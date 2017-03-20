@@ -31,138 +31,86 @@ class Model(object):
         """Method documentation"""
         return
 
-
-class SingleLayerModel(Model):
-
-    def __init__(self, input_dim, batch_size, output_dim, learn_rate):
-        self.input_d = input_dim
-        self.output_d = output_dim
-        self.batch_size = batch_size
-        self.lr = learn_rate
-        self.weight = np.array([(random.random()-0.5)/100 for _ in range((input_dim+1)*output_dim)]).reshape((input_dim + 1, output_dim))
-        self.out_exp = np.zeros(10)
-        self.out_sum = 0
-        self.range_array = [i for i in range(self.batch_size)]
-        self.last_batch = None
-        self.last_label = None
-
-    # forward pass, return the loss
-    def forward(self, batch_input, label):
-        batch_input = np.hstack((batch_input, np.ones((self.batch_size, 1))))
-        self.last_batch = batch_input
-        self.last_label = label
-        out = np.dot(batch_input, self.weight)
-        self.out_exp = 2 ** out
-        self.out_sum = np.sum(self.out_exp, axis=1)
-        return 1 - self.out_exp[(self.range_array, label)] / self.out_sum
-
-    def back_prop(self):
-        # out_exp has shape (batch_size, output_dim)
-        for ino, out_e in enumerate(self.out_exp):
-            row_sum = self.out_sum[ino]
-            lable_no = self.last_label[ino]
-            loss_dev = np.zeros(self.output_d)
-            for i, e in enumerate(out_e):
-                if i == lable_no:
-                    loss_dev[i] = (e*row_sum - e**2)/row_sum**2
-                else:
-                    loss_dev[i] = -e*out_e[lable_no]/row_sum**2
-                self.weight += loss_dev * self.last_batch[ino].reshape((-1, 1))*self.lr
-
-    def eval_label(self, data, data_label):
-        data_size = data.shape[0]
-        batch_input = np.hstack((data, np.ones((data_size, 1))))
-        out = np.dot(batch_input, self.weight)
-        out_exp = 2 ** out
-        out_sum = np.sum(out_exp, axis=1)
-        accuracy = np.equal(np.argmax(out_exp, axis=1), data_label).sum() / data_size
-        loss = (1 - out_exp[([i for i in range(data_size)], data_label)] / out_sum).sum() / data_size
-        return loss, accuracy
-
-    def train(self, data, labels):
-        last_loss = 1
-        for l in range(100):
-            for i in range(5000):
-                batch_data = data[i*self.batch_size:(i+1)*self.batch_size]
-                batch_label = labels[i*self.batch_size:(i+1)*self.batch_size]
-                loss = self.forward(batch_data, batch_label)
-                self.back_prop()
-                loss = np.average(loss)
-                accuracy = np.equal(np.argmax(self.out_exp, axis=1), batch_label).sum()/10
-                #print('iter: {}, loss: {}, accuracy: {}'.format(i, loss, accuracy))
-            loss, accuracy = self.eval_label(data[:50000], labels[:50000])
-            print('TRAIN')
-            print('iter: {}, loss: {}, accuracy: {}'.format(l, loss, accuracy))
-            loss, accuracy = self.eval_label(data[50000:], labels[50000:])
-            print('DEV')
-            print('iter: {}, loss: {}, accuracy: {}'.format(l, loss, accuracy))
-            if loss < last_loss/2:
-                self.lr /= 10
-                last_loss = loss
-
-
 class MultiLayerModel(Model):
 
     def __init__(self, layers, nodes, batch_size, learn_rate):
-        self.input_d = input_dim
-        self.output_d = output_dim
+        assert layers+1 == len(nodes)
+        self.layers = layers
+        self.nodes = nodes
         self.batch_size = batch_size
         self.lr = learn_rate
-        self.weight = np.array([(random.random()-0.5)/100 for _ in range((input_dim+1)*output_dim)]).reshape((input_dim + 1, output_dim))
-        self.out_exp = np.zeros(10)
-        self.out_sum = 0
-        self.range_array = [i for i in range(self.batch_size)]
-        self.last_batch = None
-        self.last_label = None
+        self.weights = []
+        for l in range(layers):
+            input_dim = nodes[l]
+            output_dim = nodes[l+1]
+            self.weights.append(np.array([(random.random()-0.5)/100 for _ in range((input_dim+1)*output_dim)]).
+                                reshape((input_dim + 1, output_dim)))
+        self.out_exp = None  # has shape batch_no x output_dim, stores exponents for final softmax
+        self.out_sum = None  # has shape batch_no, stores sum of exponents of out_exp for each item
+        self.last_batch = []    # has input values for each layer
+        self.last_label = None  # has shape batch_no
 
     # forward pass, return the loss
+    #@profile
     def forward(self, batch_input, label):
-        batch_input = np.hstack((batch_input, np.ones((self.batch_size, 1))))
-        self.last_batch = batch_input
+        data_size = batch_input.shape[0]
+        self.last_batch = []
         self.last_label = label
-        out = np.dot(batch_input, self.weight)
+        batch_input = np.hstack((batch_input, np.ones((data_size, 1))))
+        self.last_batch.append(batch_input)
+
+        # go through intermediate layers
+        for layer in range(self.layers-1):
+            batch_input = np.dot(batch_input, self.weights[layer])
+            # leaky RElu activation
+            batch_input[batch_input < 0] *= 0.05
+            batch_input = np.hstack((batch_input, np.ones((data_size, 1))))
+            self.last_batch.append(batch_input)
+
+        # last layer
+        out = np.dot(batch_input, self.weights[self.layers-1])
         self.out_exp = 2 ** out
         self.out_sum = np.sum(self.out_exp, axis=1)
-        return 1 - self.out_exp[(self.range_array, label)] / self.out_sum
+        loss = np.average(1 - self.out_exp[([i for i in range(data_size)], label)] / self.out_sum)
+        accuracy = np.average(np.equal(np.argmax(self.out_exp, axis=1), label))
+        return loss, accuracy
 
+    #@profile
     def back_prop(self):
+        old_weights = []
+        for weight in self.weights:
+            old_weights.append(weight.copy())
         # out_exp has shape (batch_size, output_dim)
         for ino, out_e in enumerate(self.out_exp):
             row_sum = self.out_sum[ino]
             lable_no = self.last_label[ino]
-            loss_dev = np.zeros(self.output_d)
+            loss_dev = np.zeros(self.nodes[self.layers])
             for i, e in enumerate(out_e):
                 if i == lable_no:
                     loss_dev[i] = (e*row_sum - e**2)/row_sum**2
                 else:
                     loss_dev[i] = -e*out_e[lable_no]/row_sum**2
-                self.weight += loss_dev * self.last_batch[ino].reshape((-1, 1))*self.lr
+            for layer in reversed(range(self.layers)):
+                w_diff = loss_dev * self.last_batch[layer][ino].reshape((-1, 1))*self.lr
+                self.weights[layer] += w_diff
+                loss_dev = np.dot(loss_dev, old_weights[layer].T)[:-1]
+                #loss_dev[self.last_batch[layer][ino][:-1] < 0] *= 0.05
 
-    def eval_label(self, data, data_label):
-        data_size = data.shape[0]
-        batch_input = np.hstack((data, np.ones((data_size, 1))))
-        out = np.dot(batch_input, self.weight)
-        out_exp = 2 ** out
-        out_sum = np.sum(out_exp, axis=1)
-        accuracy = np.equal(np.argmax(out_exp, axis=1), data_label).sum() / data_size
-        loss = (1 - out_exp[([i for i in range(data_size)], data_label)] / out_sum).sum() / data_size
-        return loss, accuracy
-
+    #@profile
     def train(self, data, labels):
         last_loss = 1
+        # number of times to go through entire train dataset
         for l in range(100):
-            for i in range(5000):
+            for i in range(50000//self.batch_size):
                 batch_data = data[i*self.batch_size:(i+1)*self.batch_size]
                 batch_label = labels[i*self.batch_size:(i+1)*self.batch_size]
-                loss = self.forward(batch_data, batch_label)
+                loss, accuracy = self.forward(batch_data, batch_label)
                 self.back_prop()
-                loss = np.average(loss)
-                accuracy = np.equal(np.argmax(self.out_exp, axis=1), batch_label).sum()/10
                 #print('iter: {}, loss: {}, accuracy: {}'.format(i, loss, accuracy))
-            loss, accuracy = self.eval_label(data[:50000], labels[:50000])
+            loss, accuracy = self.forward(data[:50000], labels[:50000])
             print('TRAIN')
             print('iter: {}, loss: {}, accuracy: {}'.format(l, loss, accuracy))
-            loss, accuracy = self.eval_label(data[50000:], labels[50000:])
+            loss, accuracy = self.forward(data[50000:], labels[50000:])
             print('DEV')
             print('iter: {}, loss: {}, accuracy: {}'.format(l, loss, accuracy))
             if loss < last_loss/2:
@@ -174,7 +122,7 @@ if __name__ == '__main__':
     images, labels = load_train_data()
     images = images/255
     dev_start = 50000
-    model = SingleLayerModel(28*28, 10, 10, 0.01)
+    model = MultiLayerModel(2, [28*28, 128, 10], 10, 0.01)
     model.train(images, labels)
     # model.eval(images[dev_start:])
     # image_out = Image.fromarray(images[0].reshape((28,28)))
